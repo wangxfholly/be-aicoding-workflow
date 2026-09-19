@@ -11,6 +11,8 @@ Owner contract 与本文件共同生效；冲突时返回 `unable_to_complete` �
 5. 不读取 raw Wiki Markdown，不修改 `wiki/approved`。
 6. 不读写 `.ai-workflow/runs/**/state.yaml`、events、attempt 或 packet；不调用任何 `workflow helper`（包括 `status`、`begin`、`stage`、`finalize`）。把结果返回 Harness，由 Harness stage。
 
+`verify.code_review` 的 owner contract 另行授权仓库外的一次性 OCR 临时快照与结果文件，以及用于定位审查 revision 的只读 Git 元数据查询。临时快照只能包含 `allowed_input_paths` 内的内容；这些工具临时文件不能 stage，完成后清理。目标仓库仍只允许写 `allowed_output_path`，本例外不授权读取额外业务文件、修改 Git 状态或产生 sibling artifact。
+
 ## Role boundary
 
 Child 只能调用属于自己的验证或实现命令。你不是 Harness，不拥有调度权。

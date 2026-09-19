@@ -275,6 +275,18 @@ def test_resume_can_apply_actionable_node_reruns(tmp_path: Path) -> None:
     assert "plan" not in resumed.artifacts["current_attempts"]
 
 
+def test_resume_rejects_checkpoint_claim_for_unrelated_block(tmp_path: Path) -> None:
+    _config(tmp_path)
+    service = WorkflowService(tmp_path, id_factory=lambda: "abcdef")
+    state = service.init(tmp_path, "abc123", "Reject unrelated claim")
+    service.block(state.run_id, "waiting for user")
+
+    with pytest.raises(AppError) as error:
+        service.resume(state.run_id, claim_paths=("src/app.py",))
+
+    assert error.value.code == "invalid_transition"
+
+
 def test_blocked_run_can_be_aborted_but_cannot_be_reviewed(tmp_path: Path) -> None:
     _config(tmp_path)
     service = WorkflowService(tmp_path, id_factory=lambda: "abcdef")

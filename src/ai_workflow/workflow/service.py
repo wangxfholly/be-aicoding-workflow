@@ -27,6 +27,7 @@ from ai_workflow.workflow.graph import (
     execution_kind,
 )
 from ai_workflow.workflow.checkpoint import (
+    CheckpointClaim,
     CheckpointRecord,
     CheckpointService,
     ImplementationBaseline,
@@ -52,6 +53,11 @@ BLOCKED_STATE_KEY = "_blocked_state"
 LAST_TRANSITION_KEY = "_last_transition"
 RUN_POLICY_KEY = "_run_policy"
 LIFECYCLE_OPERATION_KEY = "_lifecycle_operation"
+CHECKPOINT_CLAIM_KEY = "_checkpoint_claim"
+CLAIMABLE_CHECKPOINT_FAILURE_CODES = {
+    "checkpoint_scope_ambiguous",
+    "checkpoint_creation_failed",
+}
 LIFECYCLE_EVENT_TYPES = {
     "block": "run_blocked",
     "resume": "run_resumed",
@@ -1272,6 +1278,9 @@ class WorkflowService:
                 for phase in tuple(current_attempts):
                     if PHASE_ORDER.index(Phase(phase)) >= earliest_index:
                         current_attempts.pop(phase, None)
+                if earliest_index <= PHASE_ORDER.index(Phase.IMPLEMENT):
+                    state.artifacts.pop(CHECKPOINT_CLAIM_KEY, None)
+                    state.artifacts.pop("_checkpoint_failure", None)
             else:
                 self.machine.advance(state)
                 current_attempts.pop(transitioned_phase, None)
@@ -1335,12 +1344,15 @@ class WorkflowService:
             return state
 
     def resume(
-        self, run_id: str, reruns: dict[str, str] | None = None
+        self,
+        run_id: str,
+        reruns: dict[str, str] | None = None,
+        claim_paths: tuple[str, ...] | None = None,
     ) -> RunState:
         store = self._store(run_id)
         with store.event_lock():
             state = self._load_locked(store, run_id)
-            operation_input = self._canonical_resume_input(reruns)
+            operation_input = self._canonical_resume_input(reruns, claim_paths)
             if self._recover_lifecycle_retry_locked(
                 store, state, "resume", operation_input
             ):
@@ -1350,6 +1362,10 @@ class WorkflowService:
                     "invalid_transition", "only a blocked run can be resumed"
                 )
             self._ensure_last_transition_event_locked(store, state)
+            checkpoint_claim = self._capture_checkpoint_claim(
+                state,
+                tuple(operation_input.get("claim_paths", ())),
+            )
             prior_snapshot = self._lifecycle_snapshot(state)
             prior = state.artifacts.pop(BLOCKED_STATE_KEY, None)
             if (
@@ -1362,6 +1378,9 @@ class WorkflowService:
                 raise AppError(
                     "invalid_state", "blocked lifecycle metadata is invalid"
                 )
+            if checkpoint_claim is not None:
+                state.artifacts[CHECKPOINT_CLAIM_KEY] = checkpoint_claim.to_dict()
+            state.artifacts.pop("review_gate", None)
             state.status = prior["run"]
             effective: dict[str, str] = {}
             if reruns:
@@ -1377,14 +1396,20 @@ class WorkflowService:
                 for phase in tuple(current_attempts):
                     if PHASE_ORDER.index(Phase(phase)) >= earliest_index:
                         current_attempts.pop(phase, None)
+                if earliest_index <= PHASE_ORDER.index(Phase.IMPLEMENT):
+                    state.artifacts.pop(CHECKPOINT_CLAIM_KEY, None)
+                    state.artifacts.pop("_checkpoint_failure", None)
+            effects: dict[str, object] = {
+                "reruns": [list(item) for item in sorted(effective.items())]
+            }
+            if checkpoint_claim is not None:
+                effects["checkpoint_claim"] = checkpoint_claim.to_dict()
             self._save_lifecycle_operation_locked(
                 store,
                 state,
                 operation="resume",
                 operation_input=operation_input,
-                effects={
-                    "reruns": [list(item) for item in sorted(effective.items())]
-                },
+                effects=effects,
                 prior=prior_snapshot,
             )
             return state
@@ -2537,6 +2562,14 @@ class WorkflowService:
         if not isinstance(raw_baseline, dict):
             raise AppError("invalid_state", "implementation baseline is invalid")
         baseline = ImplementationBaseline.from_dict(raw_baseline)
+        raw_claim = state.artifacts.get(CHECKPOINT_CLAIM_KEY)
+        if raw_claim is not None and not isinstance(raw_claim, dict):
+            raise AppError("invalid_state", "checkpoint claim metadata is invalid")
+        claim = (
+            None
+            if raw_claim is None
+            else CheckpointClaim.from_dict(raw_claim)
+        )
         previous = self._active_checkpoint(state, required=False)
         record = CheckpointService(self.repo_root).create(
             run_id=state.run_id,
@@ -2547,6 +2580,7 @@ class WorkflowService:
             ).checkpoint_scope(),
             previous_checkpoint=previous,
             no_code_delivery=False,
+            claim=claim,
         )
         checkpoints = state.artifacts.setdefault("checkpoints", {})
         if not isinstance(checkpoints, dict):
@@ -2555,6 +2589,8 @@ class WorkflowService:
             None if previous is None else previous.to_dict()
         )
         checkpoints["active"] = record.to_dict()
+        state.artifacts.pop(CHECKPOINT_CLAIM_KEY, None)
+        state.artifacts.pop("_checkpoint_failure", None)
         current_attempts = self._mapping(
             state.artifacts, "current_attempts", "current attempt metadata"
         )
@@ -2906,6 +2942,7 @@ class WorkflowService:
     @staticmethod
     def _canonical_resume_input(
         reruns: dict[str, str] | None,
+        claim_paths: tuple[str, ...] | None = None,
     ) -> dict[str, object]:
         if reruns is None:
             reruns = {}
@@ -2929,7 +2966,54 @@ class WorkflowService:
                     "rerun reason must be actionable and not use the unable placeholder",
                 )
             items.append([key, reason])
-        return {"reruns": sorted(items)}
+        result: dict[str, object] = {"reruns": sorted(items)}
+        if claim_paths:
+            if not all(isinstance(path, str) and path for path in claim_paths):
+                raise AppError(
+                    "invalid_arguments", "checkpoint claim paths must not be empty"
+                )
+            paths = sorted(claim_paths)
+            if len(paths) != len(set(paths)):
+                raise AppError(
+                    "invalid_arguments", "checkpoint claim paths must be unique"
+                )
+            result["claim_paths"] = paths
+        return result
+
+    def _capture_checkpoint_claim(
+        self, state: RunState, claim_paths: tuple[str, ...]
+    ) -> CheckpointClaim | None:
+        if not claim_paths:
+            return None
+        failure = state.artifacts.get("_checkpoint_failure")
+        if (
+            state.current_phase != Phase.IMPLEMENT.value
+            or not isinstance(failure, dict)
+            or failure.get("code") not in CLAIMABLE_CHECKPOINT_FAILURE_CODES
+            or failure.get("phase") != Phase.IMPLEMENT.value
+            or not isinstance(failure.get("attempt_id"), str)
+        ):
+            raise AppError(
+                "invalid_transition",
+                "checkpoint paths may only be claimed after an ambiguous or empty checkpoint failure",
+            )
+        attempt_id = failure["attempt_id"]
+        owner = self._attempt_owner(state, attempt_id, require_current=True)
+        raw_baseline = owner.get("implementation_baseline")
+        if not isinstance(raw_baseline, dict):
+            raise AppError(
+                "invalid_state", "implementation baseline is unavailable for claim"
+            )
+        baseline = ImplementationBaseline.from_dict(raw_baseline)
+        scope = RepositoryPathAuthorizer(
+            self.repo_root, self._config()
+        ).checkpoint_scope()
+        return CheckpointService(self.repo_root, clock=self.clock).capture_claim(
+            baseline=baseline,
+            paths=claim_paths,
+            scope=scope,
+            source_failure_code=failure["code"],
+        )
 
     @staticmethod
     def _lifecycle_snapshot(state: RunState) -> dict[str, object]:
@@ -3051,26 +3135,54 @@ class WorkflowService:
                 == {"run": prior["status"], "phase": prior["phase"]}
             )
         elif operation == "resume":
+            input_keys = set(operation_input) if isinstance(operation_input, dict) else set()
             input_pairs = (
                 WorkflowService._lifecycle_rerun_pairs(
                     operation_input.get("reruns"), state
                 )
                 if isinstance(operation_input, dict)
-                and set(operation_input) == {"reruns"}
+                and input_keys in ({"reruns"}, {"reruns", "claim_paths"})
                 else None
             )
+            input_claim_paths = (
+                WorkflowService._lifecycle_claim_paths(
+                    operation_input.get("claim_paths")
+                )
+                if "claim_paths" in input_keys
+                else ()
+            )
+            effect_keys = set(effects) if isinstance(effects, dict) else set()
             effect_pairs = (
                 WorkflowService._lifecycle_rerun_pairs(
                     effects.get("reruns"), state
                 )
-                if isinstance(effects, dict) and set(effects) == {"reruns"}
+                if isinstance(effects, dict)
+                and effect_keys
+                in ({"reruns"}, {"reruns", "checkpoint_claim"})
                 else None
             )
+            effect_claim = None
+            if "checkpoint_claim" in effect_keys:
+                raw_claim = effects.get("checkpoint_claim")
+                if isinstance(raw_claim, dict):
+                    effect_claim = CheckpointClaim.from_dict(raw_claim)
             blocked_state = prior["blocked_state"]
             valid_operation = (
                 input_pairs is not None
+                and input_claim_paths is not None
                 and effect_pairs is not None
                 and all(item in effect_pairs for item in input_pairs)
+                and (
+                    (not input_claim_paths and effect_claim is None)
+                    or (
+                        input_claim_paths
+                        and effect_claim is not None
+                        and tuple(
+                            snapshot.path for snapshot in effect_claim.snapshots
+                        )
+                        == input_claim_paths
+                    )
+                )
                 and prior["status"] == NodeStatus.BLOCKED.value
                 and isinstance(blocked_state, dict)
                 and result["blocked_state"] is None
@@ -3109,6 +3221,19 @@ class WorkflowService:
                 "invalid_state", "lifecycle operation metadata is invalid"
             )
         return value
+
+    @staticmethod
+    def _lifecycle_claim_paths(value: object) -> tuple[str, ...] | None:
+        if (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(path, str) and path for path in value)
+        ):
+            return None
+        paths = tuple(value)
+        if paths != tuple(sorted(set(paths))):
+            return None
+        return paths
 
     def _ensure_lifecycle_event_locked(
         self,
@@ -3565,6 +3690,21 @@ class WorkflowService:
             "reason": loaded["reason"].strip(),
         }
 
+    @staticmethod
+    def _normalize_review_gate_after_resume(state: RunState) -> None:
+        if "review_gate" not in state.artifacts:
+            return
+        lifecycle = state.artifacts.get(LIFECYCLE_OPERATION_KEY)
+        if lifecycle is None:
+            return
+        record = WorkflowService._lifecycle_operation(state, lifecycle)
+        if (
+            record["operation"] == "resume"
+            and record["state_version"] == state.version
+            and WorkflowService._lifecycle_snapshot(state) == record["result"]
+        ):
+            state.artifacts.pop("review_gate", None)
+
     def _load(self, run_id: str) -> RunState:
         store = self._store(run_id)
         try:
@@ -3585,6 +3725,7 @@ class WorkflowService:
             raise AppError(
                 "invalid_state", "workflow state is malformed"
             ) from error
+        self._normalize_review_gate_after_resume(state)
         self._validate_state(state, run_id, store)
         return state
 
@@ -3607,6 +3748,7 @@ class WorkflowService:
             raise AppError(
                 "invalid_state", "workflow state is malformed"
             ) from error
+        self._normalize_review_gate_after_resume(state)
         self._validate_state(state, run_id, store)
         return state
 
@@ -3809,6 +3951,20 @@ class WorkflowService:
             raise AppError(
                 "invalid_state", "knowledge citation registry is invalid"
             )
+        raw_claim = state.artifacts.get(CHECKPOINT_CLAIM_KEY)
+        if raw_claim is not None:
+            if (
+                state.current_phase != Phase.IMPLEMENT.value
+                or not isinstance(raw_claim, dict)
+            ):
+                raise AppError(
+                    "invalid_state", "checkpoint claim metadata is invalid"
+                )
+            claim = CheckpointClaim.from_dict(raw_claim)
+            if claim.source_failure_code not in CLAIMABLE_CHECKPOINT_FAILURE_CODES:
+                raise AppError(
+                    "invalid_state", "checkpoint claim metadata is invalid"
+                )
         blocked = state.artifacts.get(BLOCKED_STATE_KEY)
         if state.status == NodeStatus.BLOCKED.value:
             if (

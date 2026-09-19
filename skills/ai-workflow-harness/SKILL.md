@@ -67,6 +67,8 @@ verify.code_review
 
 optional node 由 repository config 决定。Harness 不在 Markdown 或聊天里维护第二套启停规则。
 
+`verify.code_review` 默认由 reviewer child 调用 Open Code Review（OCR），再核实 finding、返回原有 ChildResult；执行细节见 [code reviewer contract](references/agents/code-reviewer.md)。已有 `commands.code_review` 时保留 repository 配置的审查引擎。四阶段和 Grill 共用该 contract；Harness 不直接执行 OCR，工具故障或覆盖不完整也不绕过 Review Gate。
+
 ## Main loop
 
 先按 [bootstrap](references/bootstrap.md) 确定唯一 `run_id`，并从 [Helper CLI](references/helper-cli.md) 读取 JSON。每个 phase 按 [subagent dispatch](references/subagent-dispatch.md) 执行固定控制顺序；barrier 后按 [Review Gate](references/review-gate.md) 产生可行动的 node reason。`transition` 后立即再次 `status`，不得凭记忆推进。

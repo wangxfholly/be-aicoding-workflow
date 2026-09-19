@@ -18,7 +18,7 @@ Helper 只持久化、校验和转换状态；语义正确性、rerun reason、C
 | `ai-workflow workflow review-accept --repo REPO --run-id RUN --expected-digest SHA` | Harness；仅在人类明确接受该 digest 后 |
 | `ai-workflow workflow transition --repo REPO --run-id RUN` | Harness；持久化 gate 已接受后 |
 | `ai-workflow workflow block --repo REPO --run-id RUN --reason TEXT` | Harness；真实阻塞且证据充分 |
-| `ai-workflow workflow resume --repo REPO --run-id RUN [--rerun NODE=REASON ...]` | 仅人类明确选择后由 Harness 代调用 |
+| `ai-workflow workflow resume --repo REPO --run-id RUN [--rerun NODE=REASON ...] [--claim-path PATH ...]` | 仅人类明确选择后由 Harness 代调用；claim 只用于 checkpoint scope 失败后的精确 dirty 路径认领 |
 | `ai-workflow workflow abort --repo REPO --run-id RUN` | 仅人类明确选择后由 Harness 代调用 |
 | `ai-workflow workflow summary --repo REPO --run-id RUN` | Harness；terminal cleanup |
 
@@ -192,7 +192,7 @@ transition 后立刻 status。不得凭 transition 前的预期继续下一步�
 
 `block` 用于真实阻塞：环境不可用、state integrity、stale review gate、权限缺失、attempt limit。blocked 后不再自动执行任何 phase 命令。
 
-`resume` 和 `abort` 只在人类选择后调用。`resume --rerun NODE=REASON` 的 reason 仍要 actionable。
+`resume` 和 `abort` 只在人类选择后调用。`resume --rerun NODE=REASON` 的 reason 仍要 actionable。`resume --claim-path PATH` 只允许在 `checkpoint_scope_ambiguous` 或 `checkpoint_creation_failed` 导致的 blocked 状态使用；每个 PATH 必须是明确的 repository-relative regular file，Helper 会持久化授权时摘要，并在下一个成功 Implement checkpoint 前校验内容未变化。未认领的 baseline dirty 路径继续排除。
 
 ### `workflow summary`
 

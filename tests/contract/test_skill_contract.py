@@ -62,7 +62,7 @@ WORKFLOW_COMMANDS = (
     "ai-workflow workflow review-accept --repo REPO --run-id RUN --expected-digest SHA",
     "ai-workflow workflow transition --repo REPO --run-id RUN",
     "ai-workflow workflow block --repo REPO --run-id RUN --reason TEXT",
-    "ai-workflow workflow resume --repo REPO --run-id RUN [--rerun NODE=REASON ...]",
+    "ai-workflow workflow resume --repo REPO --run-id RUN [--rerun NODE=REASON ...] [--claim-path PATH ...]",
     "ai-workflow workflow abort --repo REPO --run-id RUN",
     "ai-workflow workflow summary --repo REPO --run-id RUN",
 )

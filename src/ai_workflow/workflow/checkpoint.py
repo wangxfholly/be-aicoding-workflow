@@ -108,6 +108,63 @@ class ImplementationBaseline:
 
 
 @dataclass(frozen=True, slots=True)
+class CheckpointClaim:
+    source_attempt_id: str
+    source_failure_code: str
+    snapshots: tuple[PathSnapshot, ...]
+    authorized_at: str
+
+    def to_dict(self) -> dict[str, object]:
+        data = {
+            "source_attempt_id": self.source_attempt_id,
+            "source_failure_code": self.source_failure_code,
+            "snapshots": [item.to_dict() for item in self.snapshots],
+            "authorized_at": self.authorized_at,
+        }
+        validate_plain_value(data)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "CheckpointClaim":
+        if set(data) != {
+            "source_attempt_id",
+            "source_failure_code",
+            "snapshots",
+            "authorized_at",
+        }:
+            raise AppError("invalid_state", "checkpoint claim keys are invalid")
+        raw_snapshots = data["snapshots"]
+        if not isinstance(raw_snapshots, list) or not raw_snapshots or not all(
+            isinstance(item, dict) for item in raw_snapshots
+        ):
+            raise AppError("invalid_state", "checkpoint claim snapshots are invalid")
+        snapshots = tuple(PathSnapshot.from_dict(item) for item in raw_snapshots)
+        if (
+            any(item.kind != "regular" or item.digest is None for item in snapshots)
+            or tuple(item.path for item in snapshots)
+            != tuple(sorted({item.path for item in snapshots}))
+        ):
+            raise AppError("invalid_state", "checkpoint claim snapshots are invalid")
+        authorized_at = _nonblank(data["authorized_at"], "authorized_at")
+        try:
+            datetime.fromisoformat(authorized_at)
+        except ValueError as error:
+            raise AppError(
+                "invalid_state", "checkpoint claim timestamp is invalid"
+            ) from error
+        return cls(
+            source_attempt_id=_nonblank(
+                data["source_attempt_id"], "source_attempt_id"
+            ),
+            source_failure_code=_nonblank(
+                data["source_failure_code"], "source_failure_code"
+            ),
+            snapshots=snapshots,
+            authorized_at=authorized_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CheckpointRecord:
     commit_sha: str
     tree_sha: str
@@ -221,14 +278,25 @@ class CheckpointService:
         scope: CheckpointScope,
         previous_checkpoint: CheckpointRecord | None,
         no_code_delivery: bool,
+        claim: CheckpointClaim | None = None,
     ) -> CheckpointRecord:
         before = self._git_state()
         base = baseline.base_revision
-        self._ensure_baseline_dirty_unchanged(baseline)
+        claimed_paths = self._validate_claim(baseline, claim, scope)
+        self._ensure_baseline_dirty_unchanged(
+            baseline, excluded_paths=claimed_paths
+        )
+        baseline_dirty = {
+            self._repository_relative_baseline_path(path)
+            for path in baseline.dirty_paths
+        }
         candidates = [
             path
             for path in self._changed_paths(base)
-            if path not in set(baseline.dirty_paths)
+            if (
+                path not in baseline_dirty
+                or path in claimed_paths
+            )
             and not self._ignored_workflow_path(path)
         ]
         included = tuple(sorted(scope.authorize(path) for path in candidates))
@@ -295,11 +363,17 @@ class CheckpointService:
                         "--cacheinfo",
                         "100644",
                         blob,
-                        path,
+                        self._git_index_path(path),
                         env=env,
                     )
                 else:
-                    self._git("update-index", "--force-remove", "--", path, env=env)
+                    self._git(
+                        "update-index",
+                        "--force-remove",
+                        "--",
+                        self._git_index_path(path),
+                        env=env,
+                    )
             tree = self._git("write-tree", env=env)
             metadata = {
                 "schema_version": 1,
@@ -357,6 +431,54 @@ class CheckpointService:
         self.validate_record(record)
         return record
 
+    def capture_claim(
+        self,
+        *,
+        baseline: ImplementationBaseline,
+        paths: tuple[str, ...],
+        scope: CheckpointScope,
+        source_failure_code: str,
+    ) -> CheckpointClaim:
+        if not paths:
+            raise AppError(
+                "invalid_arguments", "at least one checkpoint claim path is required"
+            )
+        authorized = tuple(scope.authorize(path) for path in paths)
+        if len(set(authorized)) != len(authorized):
+            raise AppError(
+                "invalid_arguments", "checkpoint claim paths must be unique"
+            )
+        baseline_dirty = {
+            self._repository_relative_baseline_path(path)
+            for path in baseline.dirty_paths
+        }
+        current_dirty = set(self._changed_paths(baseline.base_revision))
+        if any(
+            path not in baseline_dirty or path not in current_dirty
+            for path in authorized
+        ):
+            raise AppError(
+                "checkpoint_scope_ambiguous",
+                "checkpoint claims must identify current baseline-dirty paths",
+            )
+        snapshots = tuple(
+            sorted(
+                (self._snapshot(path) for path in authorized),
+                key=lambda item: item.path,
+            )
+        )
+        if any(item.kind != "regular" for item in snapshots):
+            raise AppError(
+                "path_not_authorized",
+                "checkpoint claims must identify regular files",
+            )
+        return CheckpointClaim(
+            source_attempt_id=baseline.attempt_id,
+            source_failure_code=source_failure_code,
+            snapshots=snapshots,
+            authorized_at=self.clock().isoformat(),
+        )
+
     def validate_record(self, record: CheckpointRecord) -> None:
         try:
             self._git("cat-file", "-e", f"{record.commit_sha}^{{commit}}")
@@ -377,7 +499,9 @@ class CheckpointService:
             ) from error
 
     def _changed_paths(self, base: str) -> list[str]:
-        tracked = self._git("diff", "--name-only", "-z", base, "--")
+        tracked = self._git(
+            "diff", "--relative", "--name-only", "-z", base, "--"
+        )
         untracked = self._git("ls-files", "--others", "--exclude-standard", "-z")
         return sorted(
             set(
@@ -388,11 +512,53 @@ class CheckpointService:
             )
         )
 
+    def _validate_claim(
+        self,
+        baseline: ImplementationBaseline,
+        claim: CheckpointClaim | None,
+        scope: CheckpointScope,
+    ) -> set[str]:
+        if claim is None:
+            return set()
+        claimed_paths = {snapshot.path for snapshot in claim.snapshots}
+        baseline_dirty = {
+            self._repository_relative_baseline_path(path)
+            for path in baseline.dirty_paths
+        }
+        if not claimed_paths.issubset(baseline_dirty):
+            raise AppError(
+                "checkpoint_scope_ambiguous",
+                "checkpoint claim is outside the implementation baseline",
+            )
+        for snapshot in claim.snapshots:
+            scope.authorize(snapshot.path)
+            if self._snapshot(snapshot.path) != snapshot:
+                raise AppError(
+                    "checkpoint_scope_ambiguous",
+                    f"claimed dirty path changed: {snapshot.path}",
+                )
+        return claimed_paths
+
     def _ensure_baseline_dirty_unchanged(
-        self, baseline: ImplementationBaseline
+        self,
+        baseline: ImplementationBaseline,
+        *,
+        excluded_paths: set[str] | None = None,
     ) -> None:
+        excluded = excluded_paths or set()
         for snapshot in baseline.dirty_snapshots:
-            if self._ignored_workflow_path(snapshot.path):
+            normalized_path = self._repository_relative_baseline_path(
+                snapshot.path
+            )
+            if (
+                self._ignored_workflow_path(normalized_path)
+                or normalized_path in excluded
+            ):
+                continue
+            if normalized_path != snapshot.path:
+                # Baselines written before repository-relative Git output stored
+                # tracked subdirectory paths as missing. They remain excluded,
+                # but cannot support overlap comparison without a real digest.
                 continue
             if self._snapshot(snapshot.path) != snapshot:
                 raise AppError(
@@ -428,7 +594,12 @@ class CheckpointService:
         head = self._rev_parse("HEAD")
         head_ref = self._head_ref()
         branch_ref = None if head_ref is None else self._rev_parse(head_ref)
-        index_path = self.repo_root / ".git" / "index"
+        raw_index_path = Path(self._git("rev-parse", "--git-path", "index"))
+        index_path = (
+            raw_index_path
+            if raw_index_path.is_absolute()
+            else (self.repo_root / raw_index_path).resolve()
+        )
         return {
             "head": head,
             "head_ref": head_ref,
@@ -441,6 +612,21 @@ class CheckpointService:
         if result.returncode != 0:
             return None
         return result.stdout.decode("utf-8").strip()
+
+    def _repository_relative_baseline_path(self, path: str) -> str:
+        prefix = self._git("rev-parse", "--show-prefix")
+        if not prefix or not path.startswith(prefix):
+            return path
+        candidate = self.repo_root / path
+        relative = path[len(prefix):]
+        if candidate.exists() or not relative:
+            return path
+        if (self.repo_root / relative).exists():
+            return relative
+        return path
+
+    def _git_index_path(self, path: str) -> str:
+        return f"{self._git('rev-parse', '--show-prefix')}{path}"
 
     def _ref_exists(self, ref: str) -> bool:
         return self._run_git("show-ref", "--verify", "--quiet", ref, check=False).returncode == 0
