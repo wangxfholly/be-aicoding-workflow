@@ -2,3 +2,6 @@
 .superpowers/
 __pycache__/
 *.py[cod]
+
+# Local wiki lock file
+wiki/.wiki.lock
