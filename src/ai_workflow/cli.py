@@ -62,7 +62,6 @@ def _parser() -> argparse.ArgumentParser:
     resume.add_argument("--repo", type=Path, required=True)
     resume.add_argument("--run-id", required=True)
     resume.add_argument("--rerun", action="append", default=[])
-    resume.add_argument("--claim-path", action="append", default=[])
     begin = workflow_commands.add_parser("begin")
     begin.add_argument("--repo", type=Path, required=True)
     begin.add_argument("--run-id", required=True)
@@ -321,9 +320,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 data = service.block(args.run_id, args.reason).to_dict()
             elif args.workflow_command == "resume":
                 data = service.resume(
-                    args.run_id,
-                    _reruns(args.rerun),
-                    tuple(args.claim_path),
+                    args.run_id, _reruns(args.rerun)
                 ).to_dict()
             else:
                 data = service.abort(args.run_id).to_dict()

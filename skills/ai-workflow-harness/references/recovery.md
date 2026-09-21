@@ -50,8 +50,6 @@ ai-workflow workflow resume --repo REPO --run-id RUN [--rerun NODE=REASON ...]
 ai-workflow workflow abort --repo REPO --run-id RUN
 ```
 
-若 blocker 是 `checkpoint_scope_ambiguous` 或 `checkpoint_creation_failed`，且人类明确确认若干完整文件属于本次实现，可使用一个或多个 `--claim-path REPO_RELATIVE_FILE` 随 resume 提交。不得认领目录、protected path、symlink、special file 或未明确确认的 mixed 文件；claim 在下一个成功 Implement checkpoint 后才被消费。
-
 裸 `resume` 只解锁；带 rerun 必须有 actionable node reason。Harness 不自动 resume/abort。
 
 blocked 菜单：

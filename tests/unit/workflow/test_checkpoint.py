@@ -9,8 +9,6 @@ from ai_workflow.path_authorization import RepositoryPathAuthorizer
 from ai_workflow.workflow.checkpoint import (
     CheckpointRecord,
     CheckpointService,
-    ImplementationBaseline,
-    PathSnapshot,
 )
 
 
@@ -30,6 +28,7 @@ def test_checkpoint_uses_temporary_index_and_preserves_user_git_state(git_repo) 
         source_revision=git_repo.head,
         active_checkpoint=None,
     )
+
     git_repo.write("src/app.py", "changed\n")
     record = service.create(
         run_id="RUN-20260719-100000-abcdef",
@@ -72,123 +71,6 @@ def test_checkpoint_excludes_unchanged_preexisting_dirty_paths(git_repo) -> None
     )
 
     assert record.included_paths == ("src/app.py",)
-
-
-def test_checkpoint_includes_explicitly_claimed_baseline_dirty_path(git_repo) -> None:
-    service = CheckpointService(git_repo.root)
-    git_repo.write("src/app.py", "preexisting implementation\n")
-    git_repo.write("notes.txt", "unrelated preexisting work\n")
-    baseline = service.capture_baseline(
-        attempt_id="implement-1-abcdef",
-        source_revision=git_repo.head,
-        active_checkpoint=None,
-    )
-    claim = service.capture_claim(
-        baseline=baseline,
-        paths=("src/app.py",),
-        scope=_scope(git_repo.root),
-        source_failure_code="checkpoint_creation_failed",
-    )
-
-    record = service.create(
-        run_id="RUN-20260719-100000-abcdef",
-        baseline=baseline,
-        source_revision=git_repo.head,
-        scope=_scope(git_repo.root),
-        previous_checkpoint=None,
-        no_code_delivery=False,
-        claim=claim,
-    )
-
-    assert record.included_paths == ("src/app.py",)
-
-
-def test_checkpoint_paths_are_relative_to_configured_git_subdirectory(git_repo) -> None:
-    server = git_repo.root / "server"
-    (server / "src").mkdir(parents=True)
-    (server / ".ai-workflow.yaml").write_text(
-        "repository: nested-checkpoint\n"
-        "protected_paths: [.git/**, .ai-workflow/**]\n",
-        encoding="utf-8",
-    )
-    (server / "src" / "app.py").write_text("original\n", encoding="utf-8")
-    git_repo.git("add", "server")
-    git_repo.git("commit", "-m", "add nested repository")
-    service = CheckpointService(server)
-    (server / "src" / "app.py").write_text(
-        "preexisting implementation\n", encoding="utf-8"
-    )
-    baseline = service.capture_baseline(
-        attempt_id="implement-1-abcdef",
-        source_revision=git_repo.head,
-        active_checkpoint=None,
-    )
-    legacy_baseline = ImplementationBaseline(
-        attempt_id=baseline.attempt_id,
-        base_revision=baseline.base_revision,
-        head_revision=baseline.head_revision,
-        head_ref=baseline.head_ref,
-        dirty_paths=("server/src/app.py",),
-        dirty_snapshots=(
-            PathSnapshot("server/src/app.py", "missing", None),
-        ),
-        captured_at=baseline.captured_at,
-    )
-    scope = RepositoryPathAuthorizer(
-        server, RepositoryConfig.load(server)
-    ).checkpoint_scope()
-    claim = service.capture_claim(
-        baseline=legacy_baseline,
-        paths=("src/app.py",),
-        scope=scope,
-        source_failure_code="checkpoint_creation_failed",
-    )
-
-    record = service.create(
-        run_id="RUN-20260719-100000-abcdef",
-        baseline=legacy_baseline,
-        source_revision=git_repo.head,
-        scope=scope,
-        previous_checkpoint=None,
-        no_code_delivery=False,
-        claim=claim,
-    )
-
-    assert baseline.dirty_paths == ("src/app.py",)
-    assert record.included_paths == ("src/app.py",)
-    assert git_repo.git("show", f"{record.commit_sha}:server/src/app.py") == (
-        "preexisting implementation"
-    )
-
-
-def test_checkpoint_rejects_claimed_path_changed_after_authorization(git_repo) -> None:
-    service = CheckpointService(git_repo.root)
-    git_repo.write("src/app.py", "preexisting implementation\n")
-    baseline = service.capture_baseline(
-        attempt_id="implement-1-abcdef",
-        source_revision=git_repo.head,
-        active_checkpoint=None,
-    )
-    claim = service.capture_claim(
-        baseline=baseline,
-        paths=("src/app.py",),
-        scope=_scope(git_repo.root),
-        source_failure_code="checkpoint_scope_ambiguous",
-    )
-    git_repo.write("src/app.py", "changed after authorization\n")
-
-    with pytest.raises(AppError) as error:
-        service.create(
-            run_id="RUN-20260719-100000-abcdef",
-            baseline=baseline,
-            source_revision=git_repo.head,
-            scope=_scope(git_repo.root),
-            previous_checkpoint=None,
-            no_code_delivery=False,
-            claim=claim,
-        )
-
-    assert error.value.code == "checkpoint_scope_ambiguous"
 
 
 def test_checkpoint_rejects_dirty_overlap(git_repo) -> None:

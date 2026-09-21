@@ -164,53 +164,6 @@ class CliDriver:
             ]
         )
 
-    def workflow_transition(self, run_id: str) -> dict[str, object]:
-        return self._data(
-            [
-                "workflow",
-                "transition",
-                "--repo",
-                str(self.project_root),
-                "--run-id",
-                run_id,
-            ]
-        )
-
-    def workflow_block(self, run_id: str, reason: str) -> dict[str, object]:
-        return self._data(
-            [
-                "workflow",
-                "block",
-                "--repo",
-                str(self.project_root),
-                "--run-id",
-                run_id,
-                "--reason",
-                reason,
-            ]
-        )
-
-    def workflow_resume(
-        self,
-        run_id: str,
-        *,
-        reruns: dict[str, str] | None = None,
-        claim_paths: tuple[str, ...] = (),
-    ) -> dict[str, object]:
-        argv = [
-            "workflow",
-            "resume",
-            "--repo",
-            str(self.project_root),
-            "--run-id",
-            run_id,
-        ]
-        for node, reason in (reruns or {}).items():
-            argv.extend(["--rerun", f"{node}={reason}"])
-        for path in claim_paths:
-            argv.extend(["--claim-path", path])
-        return self._data(argv)
-
     def workflow_status(self, run_id: str) -> dict[str, object]:
         return self._data(["workflow", "status", "--repo", str(self.project_root),
                            "--run-id", run_id])

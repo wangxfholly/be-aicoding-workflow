@@ -15,30 +15,6 @@ Status: P0 workflow correctness locally verified; real-client parity evidence pe
 4. 诊断环境：`ai-workflow doctor --source-root "$PWD/skills" --repo "$PWD/examples/language-neutral" --client all`。
 5. 运行离线验证：`python -m pytest -q`。
 
-### Open Code Review
-
-`verify.code_review` 默认使用阿里开源的 [Open Code Review](https://github.com/alibaba/open-code-review) 生成审查意见，reviewer child 核实证据后写入原有审查报告，再进入原有 Review Gate。四阶段和 Grill workflow 共用这一入口。若项目已配置 `commands.code_review`，继续使用该命令。
-
-首次使用默认审查引擎前，在本机安装 CLI 并配置模型：
-
-```bash
-npm install -g @alibaba-group/open-code-review
-ocr config provider
-ocr config model
-ocr config set language 中文
-ocr llm test
-```
-
-希望在 workflow 之外直接调用官方 Skill 时，还可安装：
-
-```bash
-npx skills add alibaba/open-code-review --skill open-code-review
-```
-
-Skill 是调用入口，依赖本地 `ocr`；模型凭据保存在用户级配置，不能提交到此仓库。可复用 CC Switch 中的供应商、模型和 API Key，但协议须以 `ocr llm test` 的结果为准。
-
-workflow 审查绑定 implementation checkpoint，并在仅包含授权输入的临时 Git 快照中运行，避免审查混入工作区的无关改动。失败、部分覆盖或预算耗尽不会被当作“无问题”；reviewer 返回 blocker，由 Harness 的既有流程处理。接入规则见 [code reviewer contract](skills/ai-workflow-harness/references/agents/code-reviewer.md)。恢复其他审查引擎可通过项目已有的 `commands.code_review` 配置，不必修改状态机。
-
 ## Skill Overview
 
 Skill 名称保持英文，便于在 Codex/Claude Code 中稳定调用；说明和流程以中文为主。调用时使用 `$skill-name`，不是 `/skills` 列表里的展示标题。
