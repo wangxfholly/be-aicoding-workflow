@@ -224,13 +224,25 @@ class CheckpointService:
     ) -> CheckpointRecord:
         before = self._git_state()
         base = baseline.base_revision
-        self._ensure_baseline_dirty_unchanged(baseline)
-        candidates = [
+        changed_paths = set(self._changed_paths(base))
+        dirty_paths = set(baseline.dirty_paths)
+        dirty_snapshots = {item.path: item for item in baseline.dirty_snapshots}
+        overlapping = {
             path
-            for path in self._changed_paths(base)
-            if path not in set(baseline.dirty_paths)
+            for path in dirty_paths
+            if path in changed_paths
             and not self._ignored_workflow_path(path)
-        ]
+            and self._snapshot(path) != dirty_snapshots[path]
+        }
+        # A reviewed implementation may intentionally edit a file that was
+        # already dirty when the phase began. Include the final file contents
+        # in the hidden checkpoint only when the accepted scope authorizes it.
+        # Unchanged baseline edits remain excluded, and out-of-scope overlap
+        # still fails closed.
+        candidates = (
+            (changed_paths - dirty_paths)
+            | overlapping
+        ) - {path for path in changed_paths if self._ignored_workflow_path(path)}
         included = tuple(sorted(scope.authorize(path) for path in candidates))
         if no_code_delivery:
             if included:
@@ -377,7 +389,7 @@ class CheckpointService:
             ) from error
 
     def _changed_paths(self, base: str) -> list[str]:
-        tracked = self._git("diff", "--name-only", "-z", base, "--")
+        tracked = self._git("diff", "--relative", "--name-only", "-z", base, "--")
         untracked = self._git("ls-files", "--others", "--exclude-standard", "-z")
         return sorted(
             set(

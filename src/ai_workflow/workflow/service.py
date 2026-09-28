@@ -218,6 +218,7 @@ class WorkflowService:
         source_revision: str,
         requirement: str,
         profile: str = "full",
+        goal_loop: bool = False,
     ) -> RunState:
         config = RepositoryConfig.load(repo_root)
         if not isinstance(source_revision, str) or not source_revision.strip():
@@ -241,6 +242,7 @@ class WorkflowService:
             source_revision,
             workflow_profile.value,
             config.review_mode,
+            goal_loop,
         )
         policy_digest = hashlib.sha256(policy_payload).hexdigest()
         state = RunState.new(
@@ -253,6 +255,7 @@ class WorkflowService:
         )
         state.artifacts[RUN_POLICY_KEY] = {
             "review_mode": config.review_mode,
+            "verify_repair": "auto" if goal_loop else "human",
             "evidence_path": str(policy_path),
             "evidence_digest": policy_digest,
         }
@@ -1076,11 +1079,12 @@ class WorkflowService:
             self._ensure_last_transition_event_locked(store, state)
             self._finalized_phase(state)
             proposed, effective = self._review_reruns(state, reruns)
-            review_mode, policy_digest = self._run_policy(state, store)
+            review_mode, verify_repair, policy_digest = self._run_policy(state, store)
             decision_name: Literal["human_review", "accept"] = (
                 "human_review"
-                if state.current_phase == Phase.VERIFY.value
-                or review_mode == "human"
+                if self._verify_gate_requires_human(
+                    state.current_phase, review_mode, verify_repair, effective
+                )
                 else "accept"
             )
             existing = state.artifacts.get("review_gate")
@@ -1362,6 +1366,11 @@ class WorkflowService:
                 raise AppError(
                     "invalid_state", "blocked lifecycle metadata is invalid"
                 )
+            # A checkpoint failure can block the run while a proposed review
+            # gate is still persisted. Resuming may apply new reruns, which
+            # changes the graph used to validate that gate. Discard it so the
+            # resumed phase must produce a fresh review decision.
+            state.artifacts.pop("review_gate", None)
             state.status = prior["run"]
             effective: dict[str, str] = {}
             if reruns:
@@ -2618,6 +2627,7 @@ class WorkflowService:
         source_revision: str,
         profile: str,
         review_mode: str,
+        goal_loop: bool = False,
     ) -> bytes:
         data = {
             "schema_version": 1,
@@ -2625,6 +2635,7 @@ class WorkflowService:
             "source_revision": source_revision,
             "profile": profile,
             "review_mode": review_mode,
+            "verify_repair": "auto" if goal_loop else "human",
         }
         return (
             json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
@@ -2633,13 +2644,19 @@ class WorkflowService:
     @staticmethod
     def _run_policy(
         state: RunState, store: StateStore
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         value = state.artifacts.get(RUN_POLICY_KEY)
         if (
             not isinstance(value, dict)
             or set(value)
-            != {"review_mode", "evidence_path", "evidence_digest"}
+            != {
+                "review_mode",
+                "verify_repair",
+                "evidence_path",
+                "evidence_digest",
+            }
             or value.get("review_mode") not in {"human", "auto_accept"}
+            or value.get("verify_repair") not in {"human", "auto"}
             or not isinstance(value.get("evidence_path"), str)
             or not isinstance(value.get("evidence_digest"), str)
             or DIGEST_PATTERN.fullmatch(value["evidence_digest"]) is None
@@ -2657,6 +2674,7 @@ class WorkflowService:
             state.source_revision,
             state.profile,
             value["review_mode"],
+            value["verify_repair"] == "auto",
         )
         expected_digest = hashlib.sha256(expected_payload).hexdigest()
         if (
@@ -2665,7 +2683,18 @@ class WorkflowService:
             or evidence_payload != expected_payload
         ):
             raise AppError("invalid_state", "run policy evidence is invalid")
-        return value["review_mode"], expected_digest
+        return value["review_mode"], value["verify_repair"], expected_digest
+
+    @staticmethod
+    def _verify_gate_requires_human(
+        phase: str,
+        review_mode: str,
+        verify_repair: str,
+        effective: tuple[tuple[str, str], ...],
+    ) -> bool:
+        if phase == Phase.VERIFY.value:
+            return not (verify_repair == "auto" and effective)
+        return review_mode == "human"
 
     @staticmethod
     def _review_gate(
@@ -2701,6 +2730,7 @@ class WorkflowService:
             raise AppError(
                 "invalid_state", "review gate metadata is invalid"
             ) from error
+        policy = state.artifacts.get(RUN_POLICY_KEY)
         if (
             decision.run_id != state.run_id
             or decision.phase != state.current_phase
@@ -2715,15 +2745,25 @@ class WorkflowService:
             or len(dict(decision.effective_reruns))
             != len(decision.effective_reruns)
             or any(key not in dict(decision.effective_reruns) for key, _ in decision.proposed_reruns)
-            or (decision.decision == "accept" and phase is Phase.VERIFY)
+            or (
+                decision.decision == "accept"
+                and phase is Phase.VERIFY
+                and policy.get("verify_repair") != "auto"
+            )
         ):
             raise AppError("invalid_state", "review gate metadata is invalid")
-        policy = state.artifacts.get(RUN_POLICY_KEY)
         expected_decision = (
             "human_review"
-            if phase is Phase.VERIFY
-            or isinstance(policy, dict)
-            and policy.get("review_mode") == "human"
+            if WorkflowService._verify_gate_requires_human(
+                phase.value,
+                policy.get("review_mode")
+                if isinstance(policy, dict)
+                else "human",
+                policy.get("verify_repair")
+                if isinstance(policy, dict)
+                else "human",
+                decision.effective_reruns,
+            )
             else "accept"
         )
         if (

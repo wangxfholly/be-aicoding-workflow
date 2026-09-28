@@ -156,7 +156,7 @@ def test_installs_full_wave2_skill_suite_from_repository(tmp_path: Path) -> None
     )
 
     assert report.failed == ()
-    assert len(report.items) == 22
+    assert len(report.items) == 24
     assert all(item.status == "installed" for item in report.items)
     assert (tmp_path / "home/.agents/skills/ai-ci-failure-triage").is_symlink()
     assert (tmp_path / "home/.claude/skills/ai-workflow-harness-grill").is_symlink()

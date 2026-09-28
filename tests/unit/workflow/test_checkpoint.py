@@ -73,7 +73,7 @@ def test_checkpoint_excludes_unchanged_preexisting_dirty_paths(git_repo) -> None
     assert record.included_paths == ("src/app.py",)
 
 
-def test_checkpoint_rejects_dirty_overlap(git_repo) -> None:
+def test_checkpoint_includes_reviewed_dirty_overlap(git_repo) -> None:
     service = CheckpointService(git_repo.root)
     git_repo.write("src/app.py", "preexisting dirty\n")
     baseline = service.capture_baseline(
@@ -81,19 +81,21 @@ def test_checkpoint_rejects_dirty_overlap(git_repo) -> None:
         source_revision=git_repo.head,
         active_checkpoint=None,
     )
-    git_repo.write("src/app.py", "changed again\n")
+    git_repo.write("src/app.py", "reviewed implementation plus existing change\n")
 
-    with pytest.raises(AppError) as error:
-        service.create(
-            run_id="RUN-20260719-100000-abcdef",
-            baseline=baseline,
-            source_revision=git_repo.head,
-            scope=_scope(git_repo.root),
-            previous_checkpoint=None,
-            no_code_delivery=False,
-        )
+    record = service.create(
+        run_id="RUN-20260719-100000-abcdef",
+        baseline=baseline,
+        source_revision=git_repo.head,
+        scope=_scope(git_repo.root),
+        previous_checkpoint=None,
+        no_code_delivery=False,
+    )
 
-    assert error.value.code == "checkpoint_scope_ambiguous"
+    assert record.included_paths == ("src/app.py",)
+    assert git_repo.git("show", f"{record.commit_sha}:src/app.py") == (
+        "reviewed implementation plus existing change"
+    )
 
 
 def test_checkpoint_rejects_unauthorized_paths(git_repo) -> None:

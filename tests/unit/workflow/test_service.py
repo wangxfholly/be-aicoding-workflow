@@ -275,6 +275,42 @@ def test_resume_can_apply_actionable_node_reruns(tmp_path: Path) -> None:
     assert "plan" not in resumed.artifacts["current_attempts"]
 
 
+def test_resume_clears_review_gate_after_checkpoint_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo = tmp_path
+    _config(repo)
+    service = WorkflowService(repo, id_factory=lambda: "abcdef")
+    state = service.init(repo, "abc123", "Recover checkpoint failure")
+    _finalize_phase(service, repo, state.run_id, Phase.SPEC)
+    state = _review_transition(service, state.run_id)
+    _finalize_phase(service, repo, state.run_id, Phase.PLAN)
+    state = _review_transition(service, state.run_id)
+    _finalize_phase(service, repo, state.run_id, Phase.IMPLEMENT)
+    decision = service.review(state.run_id, {})
+
+    def fail_checkpoint(store, blocked_state, attempt_id):
+        raise AppError(
+            "checkpoint_creation_failed", "implementation checkpoint has no file changes"
+        )
+
+    monkeypatch.setattr(
+        service, "_activate_implementation_checkpoint_locked", fail_checkpoint
+    )
+
+    with pytest.raises(AppError) as error:
+        service.record_review_acceptance(state.run_id, decision.digest)
+    assert error.value.code == "checkpoint_creation_failed"
+
+    resumed = service.resume(
+        state.run_id, {"implement.code": "verify the pending implementation"}
+    )
+
+    assert "review_gate" not in resumed.artifacts
+    assert resumed.run_graph["implement.code"].validity is NodeValidity.RERUN
+    assert service.status(state.run_id).status == "pending"
+
+
 def test_blocked_run_can_be_aborted_but_cannot_be_reviewed(tmp_path: Path) -> None:
     _config(tmp_path)
     service = WorkflowService(tmp_path, id_factory=lambda: "abcdef")

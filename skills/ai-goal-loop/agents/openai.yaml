@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Goal Loop"
+  short_description: "先审方案，再多 agent 自我迭代直至达标"
+  default_prompt: "使用 $ai-goal-loop 先完成编码前方案审，再启动 goal-driven 多轮迭代，直到 acceptance criteria 全部有证据满足或进入 block。"

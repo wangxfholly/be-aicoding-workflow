@@ -54,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--source-revision", required=True)
     init.add_argument("--requirement", required=True)
     init.add_argument("--profile", default="full")
+    init.add_argument("--goal-loop", action="store_true")
     for name in ("status", "abort", "summary", "reflect"):
         command = workflow_commands.add_parser(name)
         command.add_argument("--repo", type=Path, required=True)
@@ -270,6 +271,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.source_revision,
                     args.requirement,
                     args.profile,
+                    args.goal_loop,
                 ).to_dict()
             elif args.workflow_command == "status":
                 data = service.status(args.run_id).to_dict()

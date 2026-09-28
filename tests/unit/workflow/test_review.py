@@ -95,6 +95,7 @@ def _new_finalized(
     review_mode: str = "human",
     phase: Phase = Phase.SPEC,
     unable_child: str | None = None,
+    goal_loop: bool = False,
 ) -> tuple[WorkflowService, str]:
     _config(repo, review_mode=review_mode)
     service = WorkflowService(
@@ -102,7 +103,9 @@ def _new_finalized(
         clock=lambda: datetime(2026, 7, 15, 12, 0, 0),
         id_factory=lambda: "abcdef",
     )
-    state = service.init(repo, "abc123", "Test review gates")
+    state = service.init(
+        repo, "abc123", "Test review gates", goal_loop=goal_loop
+    )
     _finalize(service, repo, state.run_id, phase, unable_child=unable_child)
     return service, state.run_id
 
@@ -193,6 +196,53 @@ def test_auto_accept_is_limited_to_non_verify_phases(tmp_path: Path) -> None:
     assert verify_decision.decision == "human_review"
     with pytest.raises(AppError, match="review gate"):
         verify_service.transition(verify_run)
+
+
+def test_goal_loop_auto_accepts_only_verify_repair_reruns(tmp_path: Path) -> None:
+    service, run_id = _new_finalized(
+        tmp_path,
+        review_mode="human",
+        phase=Phase.VERIFY,
+        goal_loop=True,
+    )
+
+    repair = service.review(run_id, {"implement.code": "unit test failed"})
+    assert repair.decision == "accept"
+    assert WorkflowService(tmp_path).transition(run_id).current_phase == "implement"
+
+    terminal_service, terminal_run = _new_finalized(
+        tmp_path / "terminal",
+        review_mode="human",
+        phase=Phase.VERIFY,
+        goal_loop=True,
+    )
+    terminal = terminal_service.review(terminal_run, {})
+    assert terminal.decision == "human_review"
+    with pytest.raises(AppError, match="review gate"):
+        terminal_service.transition(terminal_run)
+
+
+def test_goal_loop_does_not_auto_accept_plan_gate(tmp_path: Path) -> None:
+    service, run_id = _new_finalized(
+        tmp_path, review_mode="human", phase=Phase.PLAN, goal_loop=True
+    )
+
+    decision = service.review(run_id, {})
+
+    assert decision.decision == "human_review"
+    with pytest.raises(AppError, match="review gate"):
+        service.transition(run_id)
+
+
+def test_verify_repair_stays_human_without_goal_loop(tmp_path: Path) -> None:
+    service, run_id = _new_finalized(
+        tmp_path, review_mode="auto_accept", phase=Phase.VERIFY
+    )
+
+    decision = service.review(run_id, {"implement.code": "unit test failed"})
+
+    assert decision.decision == "human_review"
+    assert service.status(run_id).artifacts["_run_policy"]["verify_repair"] == "human"
 
 
 @pytest.mark.parametrize(
@@ -366,7 +416,7 @@ def test_init_reuses_identical_orphan_policy_after_state_create_failure(
         service.init(tmp_path, "abc123", "Retry identical policy")
 
     expected_policy = service._run_policy_payload(
-        run_id, "abc123", "full", "human"
+        run_id, "abc123", "full", "human", False
     )
     assert store.policy_path().read_bytes() == expected_policy
     assert not store.state_path.exists()
@@ -392,7 +442,7 @@ def test_init_conflicting_orphan_policy_does_not_publish_state(
     run_id = "RUN-20260715-120000-abcdef"
     store = service._store(run_id)
     conflicting = service._run_policy_payload(
-        run_id, "abc123", "full", "auto_accept"
+        run_id, "abc123", "full", "auto_accept", False
     )
     store.run_dir.mkdir(parents=True)
     store.write_immutable(store.policy_path(), conflicting)

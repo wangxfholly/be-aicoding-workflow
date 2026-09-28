@@ -82,6 +82,28 @@ workflow init --profile grill
 
 Checkpoint 只用于验证锚定，不更新业务分支、不 push；后续 Git 决策仍由 `$ai-git-handoff` 在人类确认后执行。
 
+### `$ai-goal-loop`
+
+`ai-workflow-harness` 之上的自动驱动层。适合目标能写成可机检验收标准、需要多轮自我迭代直至达标的场景。
+
+它先在编码前把方案立住，再把 harness 的实现与验证跑成收敛循环。design-researcher 搜论文并读本地设计 skill，design-critic 在 coder 之前审方案拆解；人接受 plan digest 之后才进入实现。每轮自动完成派发、stage、finalize、推导 rerun，把测试证据和独立 goal-verifier 的达标判定摆到 verify 的 Review Gate 前。
+
+```text
+design-researcher -> plan artifact -> design-critic -> plan review-accept
+-> begin(implement) -> dispatch coder -> stage -> finalize -> review -> transition
+-> begin(verify) -> dispatch test-runner / code-reviewer -> stage -> finalize
+-> goal-verifier(只读证据) -> review --rerun implement.code=<reason> -> review-accept -> transition -> status
+```
+
+边界：不改一行 Python，`run_graph` 仍是唯一调度真值；`--skill-dir` 必须指向 `skills/ai-workflow-harness`；不维护第二套轮次计数，轮次上限只来自 `max_attempts`。
+
+两个诚实前提：
+
+- `max_attempts` 默认 3 撑不住多轮迭代，想在 `workflow init` **之前**放大（建议 5–8）。run 开始后改 `.ai-workflow.yaml` 无效。
+- verify 的达标终审仍是 `human_review`。但 `$ai-goal-loop` 用 `workflow init --goal-loop` 启动后，测试失败要 rerun 的那一道 gate 会自动接受，循环自己回到 coder。这个标志只写进该 run 的 policy，其他 skill 的 verify gate 不变。
+
+不收敛（预算耗尽、连续两轮指纹停滞、验收标准不可机检、环境或权限失败）时它主动 `workflow block`，附完整证据交人决策，不出具伪造的成功。
+
 ### `$ai-small-tdd-change`
 
 显式触发的小范围 TDD 工作流。适合单点 bugfix、小行为改动、低风险局部修改。
@@ -231,6 +253,12 @@ $ai-workflow-harness -> $ai-knowledge-reflection -> $ai-knowledge-governance -> 
 
 ```text
 $ai-workflow-harness-grill -> implement/verify -> reflection/governance -> git handoff
+```
+
+目标明确但要多轮自我迭代到达标：
+
+```text
+$ai-goal-loop -> 编码前方案审 -> 每轮自动迭代 -> verify gate 人工终审 -> reflection/governance -> git handoff
 ```
 
 测试规划和生成：

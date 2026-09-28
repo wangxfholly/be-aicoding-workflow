@@ -89,7 +89,7 @@ def test_verify_child_rerun_reuses_checkpoint_and_valid_siblings(
     assert actions["code_review"] == "rerun"
 
 
-def test_dirty_overlap_blocks_without_moving_head_branch_or_index(
+def test_reviewed_dirty_overlap_is_checkpointed_without_moving_head_branch_or_index(
     tmp_path: Path, project_template: ProjectTemplate
 ) -> None:
     project = project_template.copy_to(tmp_path / "dirty-overlap-repo")
@@ -112,9 +112,8 @@ def test_dirty_overlap_blocks_without_moving_head_branch_or_index(
 
     status, payload = app.workflow_review_accept_status(run["run_id"], decision["digest"])
 
-    assert status != 0
-    assert payload["error"]["code"] == "checkpoint_scope_ambiguous"
-    blocked = app.workflow_status(run["run_id"])
-    assert blocked["status"] == "blocked"
-    assert blocked["artifacts"]["_checkpoint_failure"]["code"] == "checkpoint_scope_ambiguous"
+    assert status == 0
+    state = app.workflow_status(run["run_id"])
+    checkpoint = state["artifacts"]["checkpoints"]["active"]
+    assert "src/app.py" in checkpoint["included_paths"]
     assert app.snapshot_git_state() == before

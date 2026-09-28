@@ -4,6 +4,7 @@ from pathlib import Path
 EXPECTED_SKILLS = (
     "ai-ci-failure-triage",
     "ai-git-handoff",
+    "ai-goal-loop",
     "ai-integration-test-checklists",
     "ai-integration-test-generator",
     "ai-integration-test-v2",
@@ -16,7 +17,7 @@ EXPECTED_SKILLS = (
 )
 
 
-def test_wave2_skill_suite_contains_all_eleven_skills() -> None:
+def test_wave2_skill_suite_contains_all_twelve_skills() -> None:
     assert tuple(sorted(path.name for path in Path("skills").iterdir() if path.is_dir())) == EXPECTED_SKILLS
 
 

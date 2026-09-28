@@ -11,12 +11,13 @@ ai-workflow install --source-root "$PWD/skills" --client all --scope user
 ai-workflow doctor --source-root "$PWD/skills" --repo "$PWD/examples/language-neutral" --client all
 ```
 
-确认 `/skills` 能看到 11 个 Skill：
+确认 `/skills` 能看到 12 个 Skill：
 
 ```text
 AI Workflow Init
 AI Workflow Harness
 AI Workflow Harness Grill
+AI Goal Loop
 AI Small TDD Change
 AI Integration Test Checklists
 AI Integration Test Generator
